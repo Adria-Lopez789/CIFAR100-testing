@@ -1,4 +1,4 @@
-a'''ResNet in PyTorch.
+'''ResNet in PyTorch.
 
 For Pre-activation ResNet, see 'preact_resnet.py'.
 
