@@ -89,57 +89,91 @@ if device == 'cuda':
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
 
+def test_train(epoch, testloader, msg):
+    global best_acc
+    #model.eval()
+    test_loss = 0
+    correct = 0
+    total = 0
+    batch_idx = 0
+    with torch.no_grad():
+        for (inputs, targets) in enumerate(testloader):
+            inputs, targets = torch.FloatTensor(targets[0]).to(device), torch.LongTensor(np.array(targets[1])).to(device)
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
 
+            test_loss += loss.item()
 
-def train_av(epoch, trainloader, run_test=False):
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+            batch_idx += 1
+    print(msg + ": Test Epoch " + str(epoch) + " Loss " + str(test_loss / (batch_idx + 1)) + " Accuracy" + str(correct / total))
+    return test_loss/(batch_idx + 1), correct/total
+
+def train_av(epoch, trainloader, testloader, run_test=False):
     print('\nEpoch: %d' % epoch)
 
     model.train()
-    cumulative_loss_before_batch = 0
-    cumulative_loss_after_batch = 0
-    correct_before_batch = 0
-    correct_after_batch = 0
+    cumulative_loss_before_batch_train = 0
+    cumulative_loss_after_batch_train = 0
+    correct_before_batch_train = 0
+    correct_after_batch_train = 0
     total_data_samples = 0
-    batch_cnt = 1
     batch_idx = 0
-    #for batch_idx, (inputs, targets) in enumerate(trainloader):
+    loss_before_batch_test = correct_before_batch_test = loss_after_batch_test = correct_after_batch_test = 0
     for (inputs, targets) in enumerate(trainloader):
         inputs, targets = torch.FloatTensor(targets[0]).to(device), torch.LongTensor(np.array(targets[1])).to(device)
         optimizer.zero_grad()
         outputs = model(inputs)
-        loss_before_batch = criterion(outputs, targets)
-        cumulative_loss_before_batch += loss_before_batch
+        loss_before_batch_train = criterion(outputs, targets)
+        cumulative_loss_before_batch_train += loss_before_batch_train
 
         #Before we do the batch update step, we track the train accuracy
         _, predicted_before_batch = outputs.max(1)
         total_data_samples += targets.size(0)
-        correct_before_batch += predicted_before_batch.eq(targets).sum().item()
-        wandb.log({"train_loss_before_batch_update": cumulative_loss_before_batch / (batch_idx+1),
-                   "train_accuracy_before_batch_update": 100. * correct_before_batch / total_data_samples,
-                   "epoch:epoch": epoch
-                   })
-        loss_before_batch.backward()
+        correct_before_batch_train += predicted_before_batch.eq(targets).sum().item()
+
+        loss_before_batch_train.backward()
+
+        loss_before_batch_test, correct_before_batch_test = test_train(epoch, testloader, "Before Batch train")
+
         optimizer.step()
 
         outputs = model(inputs)
         loss_after_batch = criterion(outputs, targets)
+        cumulative_loss_after_batch_train += loss_after_batch.item()
         _, predicted_after_batch = outputs.max(1)
-        correct_after_batch += predicted_after_batch.eq(targets).sum().item()
-        cumulative_loss_after_batch += loss_after_batch.item()
+        correct_after_batch_train += predicted_after_batch.eq(targets).sum().item()
         batch_accuracy = predicted_after_batch.eq(targets).sum().item()
 
-        wandb.log({"train_loss_after_batch_update": cumulative_loss_after_batch / (batch_idx+1),
-                   "train_accuracy_after_batch_update": 100. * correct_after_batch / total_data_samples,
+        loss_after_batch_test, correct_after_batch_test = test_train(epoch, testloader, "After Batch train")
+
+
+        #We track the model's accuracy for the test set
+
+
+        wandb.log({"train_loss_before_batch_update": cumulative_loss_before_batch_train / (batch_idx+1),
+                   "train_accuracy_before_batch_update": 100. * correct_before_batch_train / total_data_samples,
+                   "test_accuracy_before_batch_update": 100. * correct_before_batch_test,
+                   "test_loss_before_update": loss_before_batch_test,
+
+                   "train_loss_after_batch_update": cumulative_loss_after_batch_train / (batch_idx + 1),
+                   "train_accuracy_after_batch_update": 100. * correct_after_batch_train / total_data_samples,
+                   "test_accuracy_after_batch_update": 100. * correct_after_batch_test,
+                   "test_loss_after_update": loss_after_batch_test,
+
                    "epoch:epoch": epoch
                    })
-        if batch_idx % args.print_frequency == 0:
-            print('Train Batch Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}, Accuracy: {}/{} {:.6f}'.format(
-                    epoch, batch_idx * len(inputs), len(trainloader.dataset),
-                    100. * batch_idx / len(trainloader), loss_after_batch.item(), batch_accuracy, len(inputs),
-                    batch_accuracy / len(inputs)))
+        #if batch_idx % args.print_frequency == 0:
+        print('Train Batch Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}, Accuracy: {}/{} {:.6f}'.format(
+                epoch, batch_idx * len(inputs), len(trainloader.dataset),
+                100. * batch_idx / len(trainloader), loss_after_batch.item(), batch_accuracy, len(inputs),
+                batch_accuracy / len(inputs)))
         batch_idx = batch_idx + 1
 
-    logging.info("Train Epoch %d Loss %f Accuracy %f",epoch,cumulative_loss_after_batch/(batch_idx+1), correct_after_batch/total_data_samples)
+    logging.info("Train Epoch %d Loss %f Accuracy %f",epoch,cumulative_loss_after_batch_train/(batch_idx+1), correct_after_batch_train/total_data_samples)
 
 def test_train_av(epoch, testloader, msg="Test Train "):
     global best_acc
@@ -171,10 +205,10 @@ def test_train_av(epoch, testloader, msg="Test Train "):
             "test_accuracy": 100. * correct / total,  # Divide by total number of samples for accuracy
             "epoch": epoch
         })
-    logging.info("Test Epoch %d Loss %f Accuracy %f", epoch, test_loss/(batch_idx+1), correct/total)
-    print(msg+"Test Epoch %d Loss %f Accuracy %f", epoch, test_loss/(batch_idx+1), correct/total)
+    logging.info("Test Epoch "+ str(epoch) +" Loss " + str(test_loss/(batch_idx+1)) + " Accuracy" + str(correct/total))
+    print("Test Epoch "+ str(epoch) +" Loss " + str(test_loss/(batch_idx+1)) + " Accuracy" + str(correct/total))
 
-if(args.continual_type == "CI"):
+if(args.continual_type == "CI"):#Class incremental
     # creating the benchmark (scenario object)
     split_cifar100 = SplitCIFAR100(
         n_experiences=2,
@@ -196,7 +230,7 @@ if(args.continual_type == "CI"):
     second_train_stream_dataset = train_stream[0].dataset + train_stream[1].dataset
     second_test_stream_dataset = test_stream[0].dataset + test_stream[1].dataset
 
-elif(args.continual_type == "CL" ):
+elif(args.continual_type == "CL" ):#Same classes
     split_cifar100 = SplitCIFAR100(
         n_experiences=1,
         seed=1234,
@@ -206,8 +240,11 @@ elif(args.continual_type == "CL" ):
         #fixed_class_order=list(range(100)),
         #shuffle=False,
     )
-    train_stream_dataset = split_cifar100.train_stream[0].dataset
-    test_stream_dataset = split_cifar100.test_stream[0].dataset
+    train_stream = split_cifar100.train_stream
+    test_stream = split_cifar100.test_stream
+
+    train_stream_dataset = train_stream[0].dataset
+    first_test_dataset = second_test_dataset = test_stream[0].dataset
 
     total_size = len(train_stream_dataset)
     split_sizes = [int(total_size * 0.5), total_size - int(total_size * 0.5)]  # Splitting into two equal parts
@@ -216,27 +253,23 @@ elif(args.continual_type == "CL" ):
     first_train_dataset, subset2 = torch.utils.data.random_split(train_stream_dataset, split_sizes)
     second_train_dataset = first_train_dataset + subset2
 
-    first_train_stream_dataset = train_stream[0].dataset
-    first_test_stream_dataset = test_stream[0].dataset
 
-    second_train_stream_dataset = train_stream[0].dataset + train_stream[1].dataset
-    second_test_stream_dataset = test_stream[0].dataset + test_stream[1].dataset
 
 
 
 #split_train_dataset = SplitCIFAR100(n_experiences=2, first_exp_with_half_classes=True, train_transform=transform_train, eval_transform=transform_test, dataset_root='./data')
-first_split_trainloader = torch.utils.data.DataLoader(first_train_stream_dataset, batch_size=64, shuffle=True, num_workers=2)
-second_split_trainloader = torch.utils.data.DataLoader(second_train_stream_dataset, batch_size=64, shuffle=True, num_workers=2)
+first_split_trainloader = torch.utils.data.DataLoader(first_train_dataset, batch_size=64, shuffle=True, num_workers=2)
+second_split_trainloader = torch.utils.data.DataLoader(second_train_dataset, batch_size=64, shuffle=True, num_workers=2)
 
 
 # we can recover the corresponding test experience in the test stream
-first_split_testloader = torch.utils.data.DataLoader(first_test_stream_dataset, batch_size=64, shuffle=False, num_workers=2)
-second_split_testloader = torch.utils.data.DataLoader(second_test_stream_dataset, batch_size=64, shuffle=False, num_workers=2)
+first_split_testloader = torch.utils.data.DataLoader(first_test_dataset, batch_size=64, shuffle=False, num_workers=2)
+second_split_testloader = torch.utils.data.DataLoader(second_test_dataset, batch_size=64, shuffle=False, num_workers=2)
 
 #We do a first epoch with the trained path, to see its accuracy
 if(args.start_from_checkpoint != ""):
     epoch = 0
-    train_av(epoch, first_split_trainloader)
+    train_av(epoch, first_split_trainloader, first_split_testloader)
     test_train_av(epoch, first_split_testloader)
 
 else:
@@ -255,7 +288,7 @@ else:
                "epoch:epoch": 0
                })
 for epoch in range(start_epoch, start_epoch+args.epochs):
-    train_av(epoch, second_split_trainloader)
+    train_av(epoch, second_split_trainloader, second_split_testloader)
     test_train_av(epoch, second_split_testloader)
 
 torch.save({
@@ -266,7 +299,3 @@ torch.save({
             }, "./checkpoint/ckpt_"+str(chkpt_no)+"_1.pth")
 
 
-#for epoch in range(start_epoch, start_epoch+args.epochs):
-#    train(epoch,trainloader_complete)
-#    test_train_av(epoch, split_testloader)
-#    test(epoch)
