@@ -4,7 +4,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
-
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
 import torchvision
 import torchvision.transforms as transforms
 from avalanche.benchmarks.classic import SplitCIFAR100
@@ -21,12 +22,12 @@ from copy import deepcopy
 import logging
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR100 Training')
-parser.add_argument('--chkpt', default=3, type=int, help='checkpoint number')
+parser.add_argument('--chkpt', default=4, type=int, help='checkpoint number')
 parser.add_argument('--epochs', default=100, type=int, help='number of epochs')
 parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
 parser.add_argument('--momentum','-m', default=0.9, type=float, help='momentum')
 parser.add_argument('--print-frequency', default=2, type=int)
-parser.add_argument('--start-from-checkpoint', default="", type=str)
+parser.add_argument('--start-from-checkpoint', default="checkpoint/ckpt_4_0.pth", type=str)
 parser.add_argument('--continual-type', default="CL", type=str)
 #parser.add_argument('--start-from-checkpoint', default="", type=str)
 
@@ -39,10 +40,7 @@ logging.basicConfig(filename="logs/logs_"+str(chkpt_no)+".log", filemode='w', le
 data = torch.tensor([[1.0, 2.0, 3.0],
                      [2.0, 4.0, 6.0]])
 
-# Compute the covariance matrix
-cov_matrix = torch.cov(data)
 
-print(cov_matrix)
 wandb.login(key="6f35bcdd0108305865b662cb61e4572421e36d7a")
 wandb.init(
     project="cifar100_50-100_CL",
@@ -89,33 +87,10 @@ if device == 'cuda':
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
 
-def test_train(epoch, testloader, msg):
-    global best_acc
-    #model.eval()
-    test_loss = 0
-    correct = 0
-    total = 0
-    batch_idx = 0
-    with torch.no_grad():
-        for (inputs, targets) in enumerate(testloader):
-            inputs, targets = torch.FloatTensor(targets[0]).to(device), torch.LongTensor(np.array(targets[1])).to(device)
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
 
-            test_loss += loss.item()
-
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
-            batch_idx += 1
-    print(msg + ": Test Epoch " + str(epoch) + " Loss " + str(test_loss / (batch_idx + 1)) + " Accuracy" + str(correct / total))
-    return test_loss/(batch_idx + 1), correct/total
-
-def train_av(epoch, trainloader, testloader, run_test=False):
+def train_av(epoch, trainloader, testloader, maxNumBatches):
     print('\nEpoch: %d' % epoch)
 
-    model.train()
     cumulative_loss_before_batch_train = 0
     cumulative_loss_after_batch_train = 0
     correct_before_batch_train = 0
@@ -123,7 +98,13 @@ def train_av(epoch, trainloader, testloader, run_test=False):
     total_data_samples = 0
     batch_idx = 0
     loss_before_batch_test = correct_before_batch_test = loss_after_batch_test = correct_after_batch_test = 0
+
+
+
     for (inputs, targets) in enumerate(trainloader):
+        if(batch_idx > maxNumBatches):
+            break
+        model.train()
         inputs, targets = torch.FloatTensor(targets[0]).to(device), torch.LongTensor(np.array(targets[1])).to(device)
         optimizer.zero_grad()
         outputs = model(inputs)
@@ -137,7 +118,7 @@ def train_av(epoch, trainloader, testloader, run_test=False):
 
         loss_before_batch_train.backward()
 
-        loss_before_batch_test, correct_before_batch_test = test_train(epoch, testloader, "Before Batch train")
+        #loss_before_batch_test, correct_before_batch_test = test_train(epoch, testloader, "Before Batch train")
 
         optimizer.step()
 
@@ -148,10 +129,10 @@ def train_av(epoch, trainloader, testloader, run_test=False):
         correct_after_batch_train += predicted_after_batch.eq(targets).sum().item()
         batch_accuracy = predicted_after_batch.eq(targets).sum().item()
 
-        loss_after_batch_test, correct_after_batch_test = test_train(epoch, testloader, "After Batch train")
-
-
         #We track the model's accuracy for the test set
+        loss_after_batch_test, correct_after_batch_test = test_train_confusion(batch_idx, testloader)
+
+
 
 
         wandb.log({"train_loss_before_batch_update": cumulative_loss_before_batch_train / (batch_idx+1),
@@ -174,6 +155,69 @@ def train_av(epoch, trainloader, testloader, run_test=False):
         batch_idx = batch_idx + 1
 
     logging.info("Train Epoch %d Loss %f Accuracy %f",epoch,cumulative_loss_after_batch_train/(batch_idx+1), correct_after_batch_train/total_data_samples)
+
+
+def test_train_confusion(batch, testloader, msg="Test Train "):
+    global best_acc
+    model.eval()
+    test_loss = 0
+    correct = 0
+    total = 0
+    batch_idx = 0
+    all_predictions = torch.tensor([]).to(device)
+    all_targets = torch.tensor([]).to(device)
+    with torch.no_grad():
+
+        for (inputs, targets) in enumerate(testloader):
+            inputs, targets = torch.FloatTensor(targets[0]).to(device), torch.LongTensor(np.array(targets[1])).to(device)
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = model(inputs)
+
+
+            #This lines of code is used to get the data to use for the confusion matrix
+            all_predictions = torch.cat((all_predictions, outputs),dim=0)
+            all_targets = torch.cat((all_targets, targets), dim=0)
+
+            loss = criterion(outputs, targets)
+
+            test_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+            batch_idx = batch_idx + 1
+
+            #print('Test Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+            #    epoch, batch_idx * len(inputs), len(testloader.dataset),
+            #    100. * batch_idx / len(testloader), loss.item()))
+        print("Test loss: " + str(test_loss/(batch_idx + 1)) + " ---- Accuracy: " + str(correct/total))
+
+        #calculate the confusion matrix:
+        conf_matrix = confusion_matrix(all_targets.cpu(), all_predictions.argmax(dim=1).cpu())
+
+        matrix_size = conf_matrix.shape[0]  # Assuming it's square (n_classes x n_classes)
+
+        # Calculate the starting and ending indices for the center 10x10 matrix
+        center_start = (matrix_size // 2) - 10  # Start index for center 10x10
+        center_end = center_start + 20  # End index for center 10x10
+
+        # Extract the center 10x10 matrix
+        center_matrix = conf_matrix[center_start:center_end, center_start:center_end]
+
+        # Display the center 10x10 matrix
+        plt.figure(figsize=(8, 6))
+        display = ConfusionMatrixDisplay(confusion_matrix=center_matrix)
+        display.plot(cmap=plt.cm.Blues)
+        plt.savefig('matrices_plots/confusion_matrix_' + str(batch) + '.png')
+        np.save('matrices_numbers/confusion_matrix_' + str(batch) + '.npy', conf_matrix)
+
+
+    return test_loss/(batch_idx + 1), correct/total
+
+
+
+
+
+
 
 def test_train_av(epoch, testloader, msg="Test Train "):
     global best_acc
@@ -267,29 +311,10 @@ first_split_testloader = torch.utils.data.DataLoader(first_test_dataset, batch_s
 second_split_testloader = torch.utils.data.DataLoader(second_test_dataset, batch_size=64, shuffle=False, num_workers=2)
 
 #We do a first epoch with the trained path, to see its accuracy
-if(args.start_from_checkpoint != ""):
-    epoch = 0
-    train_av(epoch, first_split_trainloader, first_split_testloader)
-    test_train_av(epoch, first_split_testloader)
 
-else:
-    #We align both graphs
-    for (inputs, targets) in enumerate(first_split_trainloader):
-        wandb.log({"train_loss_after_batch_update": 0,
-                   "train_accuracy_after_batch_update": 0,
-                   "epoch:epoch": 0
-                   })
-        wandb.log({"train_loss_before_batch_update": 0,
-                   "train_accuracy_before_batch_update": 0,
-                   "epoch:epoch": 0
-                   })
-    wandb.log({"test_loss": 0,
-               "test_accuracy": 0,
-               "epoch:epoch": 0
-               })
 for epoch in range(start_epoch, start_epoch+args.epochs):
-    train_av(epoch, second_split_trainloader, second_split_testloader)
     test_train_av(epoch, second_split_testloader)
+    train_av(epoch, second_split_trainloader, second_split_testloader, 9999)
 
 torch.save({
             'epoch': args.epochs,
