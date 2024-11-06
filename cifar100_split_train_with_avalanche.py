@@ -22,23 +22,17 @@ from copy import deepcopy
 import logging
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR100 Training')
-parser.add_argument('--chkpt', default=4, type=int, help='checkpoint number')
 parser.add_argument('--epochs', default=100, type=int, help='number of epochs')
 parser.add_argument('--lr', default=0.01, type=float, help='learning rate')
+parser.add_argument('--lr-start', default=0.00001, type=float, help='learning rate')
+parser.add_argument('--lr-increase', default=False, type=bool, help='learning rate')
 parser.add_argument('--momentum','-m', default=0.9, type=float, help='momentum')
 parser.add_argument('--print-frequency', default=2, type=int)
-parser.add_argument('--start-from-checkpoint', default="checkpoint/ckpt_4_0.pth", type=str)
+parser.add_argument('--start-from-checkpoint', default="", type=str)
 parser.add_argument('--continual-type', default="CL", type=str)
 #parser.add_argument('--start-from-checkpoint', default="", type=str)
 
 args = parser.parse_args()
-chkpt_no = args.chkpt
-logging.basicConfig(filename="logs/logs_"+str(chkpt_no)+".log", filemode='w', level=logging.DEBUG)
-
-
-
-data = torch.tensor([[1.0, 2.0, 3.0],
-                     [2.0, 4.0, 6.0]])
 
 
 wandb.login(key="6f35bcdd0108305865b662cb61e4572421e36d7a")
@@ -85,77 +79,70 @@ if device == 'cuda':
     cudnn.benchmark = True
 
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
-
+optimizer = optim.SGD(model.parameters(), lr=args.lr_start, momentum=args.momentum)
 
 def train_av(epoch, trainloader, testloader, maxNumBatches):
     print('\nEpoch: %d' % epoch)
 
-    cumulative_loss_before_batch_train = 0
-    cumulative_loss_after_batch_train = 0
-    correct_before_batch_train = 0
-    correct_after_batch_train = 0
+    cumulative_loss = 0
+    correct = 0
     total_data_samples = 0
     batch_idx = 0
-    loss_before_batch_test = correct_before_batch_test = loss_after_batch_test = correct_after_batch_test = 0
+
 
 
 
     for (inputs, targets) in enumerate(trainloader):
+        if epoch <= 1 and args.lr_increase: #At the start of training, the learning rate is very low and it starts increasing linearly to the desired learning rate
+            percentage_lr_decrease = ((epoch * len(trainloader) + batch_idx) / len(trainloader)) / 2
+            lr_difference = args.lr - args.lr_start
+            current_lr = lr_difference * percentage_lr_decrease + args.lr_start
+
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = current_lr
+
+
         if(batch_idx > maxNumBatches):
             break
+        torch.set_printoptions(threshold=float('inf'))
         model.train()
         inputs, targets = torch.FloatTensor(targets[0]).to(device), torch.LongTensor(np.array(targets[1])).to(device)
         optimizer.zero_grad()
         outputs = model(inputs)
-        loss_before_batch_train = criterion(outputs, targets)
-        cumulative_loss_before_batch_train += loss_before_batch_train
+        loss = criterion(outputs, targets)
+        cumulative_loss += loss
 
         #Before we do the batch update step, we track the train accuracy
-        _, predicted_before_batch = outputs.max(1)
         total_data_samples += targets.size(0)
-        correct_before_batch_train += predicted_before_batch.eq(targets).sum().item()
 
-        loss_before_batch_train.backward()
-
-        #loss_before_batch_test, correct_before_batch_test = test_train(epoch, testloader, "Before Batch train")
+        loss.backward()
 
         optimizer.step()
 
-        outputs = model(inputs)
-        loss_after_batch = criterion(outputs, targets)
-        cumulative_loss_after_batch_train += loss_after_batch.item()
-        _, predicted_after_batch = outputs.max(1)
-        correct_after_batch_train += predicted_after_batch.eq(targets).sum().item()
-        batch_accuracy = predicted_after_batch.eq(targets).sum().item()
+        _, predicted = outputs.max(1)
 
-        #We track the model's accuracy for the test set
-        loss_after_batch_test, correct_after_batch_test = test_train_confusion(batch_idx, testloader)
+        correct += predicted.eq(targets).sum().item()
+        batch_accuracy = predicted.eq(targets).sum().item()
+
+        """#We track the model's accuracy for the test set
+        loss_test, correct_test = test_train_confusion(batch_idx, testloader)
 
 
 
 
-        wandb.log({"train_loss_before_batch_update": cumulative_loss_before_batch_train / (batch_idx+1),
-                   "train_accuracy_before_batch_update": 100. * correct_before_batch_train / total_data_samples,
-                   "test_accuracy_before_batch_update": 100. * correct_before_batch_test,
-                   "test_loss_before_update": loss_before_batch_test,
+        wandb.log({"train_loss": cumulative_loss / (batch_idx+1),
+                   "train_accuracy": 100. * correct / total_data_samples,
+                   "test_accuracy": 100. * correct_test,
+                   "test_loss": loss_test,
+                   "epoch:epoch": epoch,
+                   "total_data_samples": total_data_samples
+                   })"""
 
-                   "train_loss_after_batch_update": cumulative_loss_after_batch_train / (batch_idx + 1),
-                   "train_accuracy_after_batch_update": 100. * correct_after_batch_train / total_data_samples,
-                   "test_accuracy_after_batch_update": 100. * correct_after_batch_test,
-                   "test_loss_after_update": loss_after_batch_test,
-
-                   "epoch:epoch": epoch
-                   })
-        #if batch_idx % args.print_frequency == 0:
         print('Train Batch Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}, Accuracy: {}/{} {:.6f}'.format(
                 epoch, batch_idx * len(inputs), len(trainloader.dataset),
-                100. * batch_idx / len(trainloader), loss_after_batch.item(), batch_accuracy, len(inputs),
+                100. * batch_idx / len(trainloader), loss.item(), batch_accuracy, len(inputs),
                 batch_accuracy / len(inputs)))
         batch_idx = batch_idx + 1
-
-    logging.info("Train Epoch %d Loss %f Accuracy %f",epoch,cumulative_loss_after_batch_train/(batch_idx+1), correct_after_batch_train/total_data_samples)
-
 
 def test_train_confusion(batch, testloader, msg="Test Train "):
     global best_acc
@@ -186,16 +173,13 @@ def test_train_confusion(batch, testloader, msg="Test Train "):
             correct += predicted.eq(targets).sum().item()
             batch_idx = batch_idx + 1
 
-            #print('Test Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-            #    epoch, batch_idx * len(inputs), len(testloader.dataset),
-            #    100. * batch_idx / len(testloader), loss.item()))
         print("Test loss: " + str(test_loss/(batch_idx + 1)) + " ---- Accuracy: " + str(correct/total))
 
         #calculate the confusion matrix:
         conf_matrix = confusion_matrix(all_targets.cpu(), all_predictions.argmax(dim=1).cpu())
-
-        matrix_size = conf_matrix.shape[0]  # Assuming it's square (n_classes x n_classes)
-
+        """
+        matrix_size = conf_matrix.shape[0]
+        
         # Calculate the starting and ending indices for the center 10x10 matrix
         center_start = (matrix_size // 2) - 10  # Start index for center 10x10
         center_end = center_start + 20  # End index for center 10x10
@@ -208,6 +192,7 @@ def test_train_confusion(batch, testloader, msg="Test Train "):
         display = ConfusionMatrixDisplay(confusion_matrix=center_matrix)
         display.plot(cmap=plt.cm.Blues)
         plt.savefig('matrices_plots/confusion_matrix_' + str(batch) + '.png')
+        """
         np.save('matrices_numbers/confusion_matrix_' + str(batch) + '.npy', conf_matrix)
 
 
@@ -240,16 +225,11 @@ def test_train_av(epoch, testloader, msg="Test Train "):
             correct += predicted.eq(targets).sum().item()
             batch_idx = batch_idx + 1
 
-            #print('Test Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-            #    epoch, batch_idx * len(inputs), len(testloader.dataset),
-            #    100. * batch_idx / len(testloader), loss.item()))
-
         wandb.log({
             "test_loss": test_loss / (batch_idx+1),  # Divide by batch_idx for average loss
             "test_accuracy": 100. * correct / total,  # Divide by total number of samples for accuracy
             "epoch": epoch
         })
-    logging.info("Test Epoch "+ str(epoch) +" Loss " + str(test_loss/(batch_idx+1)) + " Accuracy" + str(correct/total))
     print("Test Epoch "+ str(epoch) +" Loss " + str(test_loss/(batch_idx+1)) + " Accuracy" + str(correct/total))
 
 if(args.continual_type == "CI"):#Class incremental
@@ -276,7 +256,7 @@ if(args.continual_type == "CI"):#Class incremental
 
 elif(args.continual_type == "CL" ):#Same classes
     split_cifar100 = SplitCIFAR100(
-        n_experiences=1,
+        n_experiences=2,
         seed=1234,
         train_transform = transform_train,
         eval_transform = transform_test,
@@ -321,6 +301,6 @@ torch.save({
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             #'loss': loss,
-            }, "./checkpoint/ckpt_"+str(chkpt_no)+"_1.pth")
+            }, "./checkpoint/20_classes_trained_model.pth")
 
 
